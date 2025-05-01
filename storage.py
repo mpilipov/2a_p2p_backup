@@ -279,7 +279,7 @@ class Disconnection(NodeEvent):
     """Base class for both Offline and Fail, events that make a node disconnect."""
 
     def process(self, sim: Simulation):
-        """Must be implemented by subclasses."""
+        """Must be implemented by subclasses"""
         raise NotImplementedError
 
     def disconnect(self):
