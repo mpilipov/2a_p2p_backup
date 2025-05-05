@@ -36,13 +36,6 @@ class Backup(Simulation):
     def __init__(self, nodes: List['Node']):
         super().__init__()  # call the __init__ method of parent class
         self.nodes = nodes
-        # to collect data for summary
-        self.initial_data_objects = len(nodes)  # предполагаем, что только ноды с данными
-        self.successful_recoveries = 0
-        self.data_loss_events = 0
-        self.total_recovery_attempts = 0
-        self.total_recovery_time = 0.0  # суммируем по всем успешным восстановлению
-        self.recovery_start_times = {}  # по node.id храним время начала восстановления
 
         # we add to the event queue the first event of each node going online and of failing
         for node in nodes:
@@ -86,39 +79,6 @@ class Backup(Simulation):
 
         # self.log_info(f"scheduled {event.__class__.__name__} from {uploader} to {downloader}"
         #               f" in {format_timespan(delay)}")
-
-    def summary(self):
-        total_data_loss_events = sum(n.total_data_loss_events for n in self.nodes)
-        total_data_recovered = sum(n.total_data_recovered for n in self.nodes)
-        total_backups = sum(n.total_backups_made for n in self.nodes)
-        total_restores = sum(n.total_restores_made for n in self.nodes)
-
-        vulnerable_blocks = 0
-        total_blocks = 0
-        for n in self.nodes:
-            total_blocks += n.n
-            for peer in n.backed_up_blocks:
-                if peer is not None:
-                    # если блок хранится только на одном узле (peer)
-                    owners = sum(1 for other in self.nodes if n in other.remote_blocks_held)
-                    if owners == 1:
-                        vulnerable_blocks += 1
-
-        percent_restored = 100 * total_data_recovered / total_data_loss_events if total_data_loss_events else 100
-        percent_nodes_failed = 100 * sum(1 for n in self.nodes if n.total_data_loss_events > 0) / len(self.nodes)
-
-        print("\n=== Simulation Summary ===")
-        print(f"Simulated time: {format_timespan(self.t)}")
-        print(f"Total nodes: {len(self.nodes)}")
-        print(f"Total data loss events: {total_data_loss_events}")
-        print(f"Total data recovery events: {total_data_recovered}")
-        print(f"Data recovery success rate: {percent_restored:.2f}%")
-        print(f"Nodes that experienced at least one failure: {percent_nodes_failed:.2f}%")
-        print(f"Total backups made: {total_backups}")
-        print(f"Total restores made: {total_restores}")
-        print(f"Vulnerable blocks (stored on only one peer): {vulnerable_blocks} / {total_blocks}")
-
-
 
     def log_info(self, msg):
         """Override method to get human-friendly logging for time."""
@@ -187,13 +147,6 @@ class Node:
         # current uploads and downloads, stored as a reference to the relative TransferComplete event
         self.current_upload: Optional[TransferComplete] = None
         self.current_download: Optional[TransferComplete] = None
-
-        # в __post_init__
-        self.total_data_loss_events: int = 0  # сколько раз потеряны данные
-        self.total_data_recovered: int = 0    # сколько раз данные восстановлены
-        self.total_backups_made: int = 0      # сколько блоков успешно зарезервировано
-        self.total_restores_made: int = 0     # сколько блоков восстановлено
-
 
     def find_block_to_back_up(self): # +TODO
         """Returns the block id of a block that needs backing up, or None if there are none."""
@@ -376,11 +329,6 @@ class Fail(Disconnection):
         self.disconnect()
         node = self.node
         node.failed = True
-
-        # log data loss
-        node.total_data_loss_events += 1
-
-
         # all the local data is lost
         node.local_blocks = [False] * node.n  # lose all local data
         # all the remote blocks which were held on this node are lost
@@ -395,12 +343,6 @@ class Fail(Disconnection):
         node.free_space = node.storage_size - node.block_size * node.n
         # schedule the next online and recover events
         recover_time = exp_rv(node.average_recover_time)
-        # в Fail.handle()
-        #self.node.local_blocks = [False] * self.node.n
-        #self.node.total_data_loss_events += 1
-        node.local_blocks = [False] * self.node.n
-        node.total_data_loss_events += 1
-
         # schedule the recovery event of this node in a random exponentioal time
         sim.schedule(recover_time, Recover(node))
 
@@ -454,21 +396,15 @@ class BlockBackupComplete(TransferComplete):
         # now the peer knows that he has a block from the owner
         peer.remote_blocks_held[owner] = self.block_id
 
-        owner.backed_up_blocks[self.block_id] = self.downloader
-        owner.total_backups_made += 1 # ???
-
-
 
 class BlockRestoreComplete(TransferComplete):
     def update_block_state(self):
         owner = self.downloader
         # now the owner knows that his block is held locally 
         owner.local_blocks[self.block_id] = True
-        # if all the k blocks are held locally -  all the data is restoredXXX
-        # owner.local_blocks[block_id] = TrueXXX
-        owner.total_restores_made += 1
+        # if all the k blocks are held locally -  all the data is restored
         if sum(owner.local_blocks) == owner.k:  # we have exactly k local blocks, we have all of them then
-            self.downloader.total_data_recovered += 1        # +TODO
+            pass        # +TODO
 
 
 def main():
@@ -477,8 +413,6 @@ def main():
     parser.add_argument("--max-t", default="100 years")
     parser.add_argument("--seed", help="random seed")
     parser.add_argument("--verbose", action='store_true')
-    parser.add_argument("--summary", action="store_true", help="print simulation summary")
-
     args = parser.parse_args()
 
     if args.seed:
@@ -508,9 +442,6 @@ def main():
     sim = Backup(nodes)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
-    if args.summary:
-        sim.summary()
-
 
 
 if __name__ == '__main__':
