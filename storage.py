@@ -84,8 +84,6 @@ class Backup(Simulation):
         downloader.current_download = event
         uploader.current_upload = event
 
-        # self.log_info(f"scheduled {event.__class__.__name__} from {uploader} to {downloader}"
-        #               f" in {format_timespan(delay)}")
 
     def summary(self):
         total_data_loss_events = sum(n.total_data_loss_events for n in self.nodes)
@@ -99,15 +97,18 @@ class Backup(Simulation):
             total_blocks += n.n
             for peer in n.backed_up_blocks:
                 if peer is not None:
-                    # если блок хранится только на одном узле (peer)
+                    # SUM
                     owners = sum(1 for other in self.nodes if n in other.remote_blocks_held)
                     if owners == 1:
+                        #if the block is backed up only on a remote node we add it to the vulnerable blocks
                         vulnerable_blocks += 1
 
+        # percent of the restored data
         percent_restored = 100 * total_data_recovered / total_data_loss_events if total_data_loss_events else 100
+        # percent of nodes that experienced at least one failure
         percent_nodes_failed = 100 * sum(1 for n in self.nodes if n.total_data_loss_events > 0) / len(self.nodes)
 
-        print("\n=== Simulation Summary ===")
+        print("\nSummary of the simulation:")
         print(f"Simulated time: {format_timespan(self.t)}")
         print(f"Total nodes: {len(self.nodes)}")
         print(f"Total data loss events: {total_data_loss_events}")
@@ -116,7 +117,7 @@ class Backup(Simulation):
         print(f"Nodes that experienced at least one failure: {percent_nodes_failed:.2f}%")
         print(f"Total backups made: {total_backups}")
         print(f"Total restores made: {total_restores}")
-        print(f"Vulnerable blocks (stored on only one peer): {vulnerable_blocks} / {total_blocks}")
+        print(f"Vulnerable blocks {vulnerable_blocks} / {total_blocks}")
 
 
 
@@ -188,11 +189,11 @@ class Node:
         self.current_upload: Optional[TransferComplete] = None
         self.current_download: Optional[TransferComplete] = None
 
-        # в __post_init__
-        self.total_data_loss_events: int = 0  # сколько раз потеряны данные
-        self.total_data_recovered: int = 0    # сколько раз данные восстановлены
-        self.total_backups_made: int = 0      # сколько блоков успешно зарезервировано
-        self.total_restores_made: int = 0     # сколько блоков восстановлено
+        # for Summary()
+        self.total_data_loss_events: int = 0  # how many times data was lost Fail.process()
+        self.total_data_recovered: int = 0    # how many times data was recovered BlockRestoreComplete.update_block_state()
+        self.total_backups_made: int = 0      # how many blocks were backed up BlockBackupComplete.update_block_state()
+        self.total_restores_made: int = 0     # how many blocks were restored BlockRestoreComplete.update_block_state()
 
 
     def find_block_to_back_up(self): # +TODO
@@ -464,8 +465,6 @@ class BlockRestoreComplete(TransferComplete):
         owner = self.downloader
         # now the owner knows that his block is held locally 
         owner.local_blocks[self.block_id] = True
-        # if all the k blocks are held locally -  all the data is restoredXXX
-        # owner.local_blocks[block_id] = TrueXXX
         owner.total_restores_made += 1
         if sum(owner.local_blocks) == owner.k:  # we have exactly k local blocks, we have all of them then
             self.downloader.total_data_recovered += 1        # +TODO
