@@ -78,6 +78,15 @@ class Backup(Simulation):
         else:
             # set an event to back up the block
             event = BlockBackupComplete(uploader, downloader, block_id)
+            
+            # money transfer when backing up
+            price = uploader.price_per_block
+            if downloader.balance >= price:
+                downloader.balance = downloader.balance - price
+                uploader.balance = uploader.balance + price
+            else:
+                sim.log_info(f"Transfer was skipped: {downloader} cannot afford block backup to {uploader}")
+                return # we don't want to transfer the block if the downloader cannot afford it
         # add the event to the event queue
         self.schedule(delay, event)
         # update the status of the uploader and downloader: they are busy now
@@ -195,6 +204,11 @@ class Node:
         self.total_backups_made: int = 0      # how many blocks were backed up BlockBackupComplete.update_block_state()
         self.total_restores_made: int = 0     # how many blocks were restored BlockRestoreComplete.update_block_state()
 
+        # economic parameters
+        self.balance = 0.0
+        self.price_per_block = 1.0
+
+    
 
     def find_block_to_back_up(self): # +TODO
         """Returns the block id of a block that needs backing up, or None if there are none."""
@@ -239,8 +253,14 @@ class Node:
         # if the peer is not self, is online, is not among the remote owners, has enough space and is not
         # downloading anything currently, schedule the backup of block_id from self to peer
             if (peer is not self and peer.online and peer not in remote_owners and peer.current_download is None # +TODO
-                    and peer.free_space >= self.block_size):                                                    # +TODO
-                sim.schedule_transfer(self, peer, block_id, restore=False)                                    # +TODO
+                    and peer.free_space >= self.block_size):
+                cost = peer.price_per_block
+                if self.balance >= cost:
+                    self.balance = self.balance - cost
+                    peer.balance = peer.balance + cost                                                    # +TODO
+                    sim.schedule_transfer(self, peer, block_id, restore=False)                                    # +TODO
+                else:
+                    sim.log_info(f"{self.name} can't afford to store block {block_id} on {peer.name} (balance: {self.balance}, cost: {cost})")
                 return
 
     def schedule_next_download(self, sim: Backup):
@@ -266,8 +286,26 @@ class Node:
                     and self.free_space >= peer.block_size):                                                # +TODO                                     
                 block_id = peer.find_block_to_back_up()
                 if block_id is not None:
-                    sim.schedule_transfer(peer, self, block_id, restore=False)                               # +TODO
+                    cost = self.price_per_block
+                    if peer.balance >= cost:
+                        peer.balance = peer.balance - cost
+                        self.balance = self.balance + cost                                                # +TODO
+                        sim.schedule_transfer(peer, self, block_id, restore=False)                               # +TODO
+                    else:
+                        sim.log_info(f"{peer.name} can't afford to store block {block_id} on {self.name} (balance: {peer.balance}, cost: {cost})")
                     return
+
+    # Check if this node has enough balance to pay for storing one block on the peer        
+    def can_afford_backup(self, peer: "Node") -> bool:
+        return self.balance >= peer.price_per_block
+    
+
+    # Transfer funds to peer for storing a backup block.
+    def pay_for_backup(self, peer: "Node"):
+        if not self.can_afford_backup(peer):
+            raise RuntimeError(f"{self.name} cannot afford to pay {peer.price_per_block} to {peer.name}")
+        self.balance -= peer.price_per_block
+        peer.balance += peer.price_per_block   
 
     def __hash__(self):
         """Function that allows us to have `Node`s as dictionary keys or set items.
@@ -277,9 +315,7 @@ class Node:
         return id(self)
 
     def __str__(self):
-        """Function that will be called when converting this to a string (e.g., when logging or printing)."""
-
-        return self.name
+        return f"{self.name} balance: {self.balance:.2f}"
 
 
 @dataclass
@@ -425,6 +461,17 @@ class TransferComplete(Event):
             return  # this transfer was canceled, so ignore this event
         uploader, downloader = self.uploader, self.downloader
         assert uploader.online and downloader.online
+
+        # economics part: only if it is a backup we send money to the peer
+
+        if isinstance(self, BlockBackupComplete):
+            cost = downloader.price_per_block
+            if uploader.balance >= cost:
+                uploader.balance = uploader.balance - cost
+                downloader.balance = downloader.balance + cost
+                sim.log_info(f"{uploader} paid {cost} to {downloader} for storing block {self.block_id}")
+            else:
+                sim.log_info(f"{uploader.name} couldn't afford to pay {cost:.2f} to {downloader.name} — balance: {uploader.balance:.2f}")    
         # it updates the state of the uploader and downloader
         # it's implemented in the BlockBackupComplete and BlockRestoreComplete classes
         self.update_block_state()
@@ -454,8 +501,6 @@ class BlockBackupComplete(TransferComplete):
         owner.backed_up_blocks[self.block_id] = peer
         # now the peer knows that he has a block from the owner
         peer.remote_blocks_held[owner] = self.block_id
-
-        owner.backed_up_blocks[self.block_id] = self.downloader
         owner.total_backups_made += 1 # ???
 
 
@@ -463,6 +508,11 @@ class BlockBackupComplete(TransferComplete):
 class BlockRestoreComplete(TransferComplete):
     def update_block_state(self):
         owner = self.downloader
+
+        if owner.local_blocks[self.block_id]:
+            # if the block is already on the downloader, we don't need restore it
+            return
+        
         # now the owner knows that his block is held locally 
         owner.local_blocks[self.block_id] = True
         owner.total_restores_made += 1
