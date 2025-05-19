@@ -7,6 +7,7 @@ import random
 from dataclasses import dataclass
 from random import expovariate
 from typing import Optional, List
+from collections import defaultdict
 
 # the humanfriendly library (https://humanfriendly.readthedocs.io/en/latest/) lets us pass parameters in human-readable
 # format (e.g., "500 KiB" or "5 days"). You can safely remove this if you don't want to install it on your system, but
@@ -117,6 +118,19 @@ class Backup(Simulation):
         # percent of nodes that experienced at least one failure
         percent_nodes_failed = 100 * sum(1 for n in self.nodes if n.total_data_loss_events > 0) / len(self.nodes)
 
+        type_summary = defaultdict(lambda:{
+            'count': 0,
+            'initial_balance': 0,
+            'final_balance': 0,
+            'failed_backups_cost_reason': 0
+        })
+        for n in self.nodes:
+            node_type = n.name.split('-')[0]
+            type_summary[node_type]['count'] += 1
+            type_summary[node_type]['initial_balance'] += getattr(n, 'initial_balance', n.balance) # if it's not saved
+            type_summary[node_type]['final_balance'] += n.balance
+            type_summary[node_type]['failed_backups_cost_reason'] += getattr(n, 'failed_backups_cost_reason', 0) # if it's not saved
+
         print("\nSummary of the simulation:")
         print(f"Simulated time: {format_timespan(self.t)}")
         print(f"Total nodes: {len(self.nodes)}")
@@ -128,6 +142,16 @@ class Backup(Simulation):
         print(f"Total restores made: {total_restores}")
         print(f"Vulnerable blocks {vulnerable_blocks} / {total_blocks}")
 
+        print(f"\nEconomics summary (by node type):")
+        for node_type, summary in type_summary.items():
+            delta = summary['final_balance'] - summary['initial_balance']
+            print(f"{node_type}: ")
+            print(f"Nodes: {summary['count']}")
+            print(f"Initial balance: {summary['initial_balance']:.4f}")
+            print(f"Final balance: {summary['final_balance']:.4f}")
+            print(f"Balance change: {delta:+.4f}")
+            print(f"Failed backups because of the cost of it: {summary['failed_backups_cost_reason']:.0f}")
+            print("\n")
 
 
     def log_info(self, msg):
@@ -166,6 +190,11 @@ class Node:
 
     arrival_time: float  # time at which the node will come online
 
+    # Economics initial parameters
+    balance: float = 0.0
+    price_per_block: float = 1.0
+    failed_backups_cost_reason: int = 0.0
+
     def __post_init__(self):
         """Compute other data dependent on config values and set up initial state."""
 
@@ -203,10 +232,6 @@ class Node:
         self.total_data_recovered: int = 0    # how many times data was recovered BlockRestoreComplete.update_block_state()
         self.total_backups_made: int = 0      # how many blocks were backed up BlockBackupComplete.update_block_state()
         self.total_restores_made: int = 0     # how many blocks were restored BlockRestoreComplete.update_block_state()
-
-        # economic parameters
-        self.balance = 0.0
-        self.price_per_block = 1.0
 
     
 
@@ -254,13 +279,15 @@ class Node:
         # downloading anything currently, schedule the backup of block_id from self to peer
             if (peer is not self and peer.online and peer not in remote_owners and peer.current_download is None # +TODO
                     and peer.free_space >= self.block_size):
-                cost = peer.price_per_block
-                if self.balance >= cost:
-                    self.balance = self.balance - cost
-                    peer.balance = peer.balance + cost                                                    # +TODO
-                    sim.schedule_transfer(self, peer, block_id, restore=False)                                    # +TODO
-                else:
-                    sim.log_info(f"{self.name} can't afford to store block {block_id} on {peer.name} (balance: {self.balance}, cost: {cost})")
+                # cost = peer.price_per_block
+                # if self.balance >= cost:
+                #     self.balance = self.balance - cost
+                #     peer.balance = peer.balance + cost                                                    # +TODO
+                sim.schedule_transfer(self, peer, block_id, restore=False)                                    # +TODO
+                return
+            else:
+                sim.log_info(f"{self.name} can't afford to store block {block_id} on {peer.name} (balance: {self.balance}, cost: {self.price_per_block})") # !!!111
+                self.failed_backups_cost_reason += 1
                 return
 
     def schedule_next_download(self, sim: Backup):
@@ -283,17 +310,18 @@ class Node:
             # if the peer is not self, is online, has no current upload, is not among the remote owners,
             # has enough space and is not downloading anything currently, schedule the backup of block_id from self to peer
             if (peer is not self and peer.online and peer.current_upload is None and peer not in self.remote_blocks_held # +TODO
-                    and self.free_space >= peer.block_size):                                                # +TODO                                     
+                    and self.free_space >= peer.block_size and self.current_download is None):                                                # +TODO                                     
                 block_id = peer.find_block_to_back_up()
                 if block_id is not None:
-                    cost = self.price_per_block
-                    if peer.balance >= cost:
-                        peer.balance = peer.balance - cost
-                        self.balance = self.balance + cost                                                # +TODO
-                        sim.schedule_transfer(peer, self, block_id, restore=False)                               # +TODO
-                    else:
-                        sim.log_info(f"{peer.name} can't afford to store block {block_id} on {self.name} (balance: {peer.balance}, cost: {cost})")
+                    # cost = self.price_per_block
+                    # if peer.balance >= cost:
+                    #     peer.balance = peer.balance - cost
+                    #     self.balance = self.balance + cost                                                # +TODO
+                    sim.schedule_transfer(peer, self, block_id, restore=False)                               # +TODO
                     return
+                else:
+                    sim.log_info(f"{peer.name} can't afford to store block {block_id} on {self.name} (balance: {peer.balance}, cost: {self.price_per_block})")
+        return
 
     # Check if this node has enough balance to pay for storing one block on the peer        
     def can_afford_backup(self, peer: "Node") -> bool:
@@ -469,7 +497,8 @@ class TransferComplete(Event):
             if uploader.balance >= cost:
                 uploader.balance = uploader.balance - cost
                 downloader.balance = downloader.balance + cost
-                sim.log_info(f"{uploader} paid {cost} to {downloader} for storing block {self.block_id}")
+                print(f"[PAYMENT] {uploader} paid {cost:.2f} to {downloader} for block {self.block_id}")
+                # sim.log_info(f"{uploader} paid {cost} to {downloader} for storing block {self.block_id}")
             else:
                 sim.log_info(f"{uploader.name} couldn't afford to pay {cost:.2f} to {downloader.name} — balance: {uploader.balance:.2f}")    
         # it updates the state of the uploader and downloader
@@ -542,18 +571,38 @@ def main():
         ('upload_speed', parse_size), ('download_speed', parse_size),
         ('average_uptime', parse_timespan), ('average_downtime', parse_timespan),
         ('average_lifetime', parse_timespan), ('average_recover_time', parse_timespan),
-        ('arrival_time', parse_timespan)
+        ('arrival_time', parse_timespan),
+        ('balance', float), ('price_per_gb', float)
     ]
 
     config = configparser.ConfigParser()
     config.read(args.config)
     nodes = []  # we build the list of nodes to pass to the Backup class
+
     for node_class in config.sections():
+        if not config.has_option(node_class, "count"):
+            logging.warning(f"Skipping section '{node_class}' — missing 'count'")
+            continue
         class_config = config[node_class]
         # list comprehension: https://docs.python.org/3/tutorial/datastructures.html#list-comprehensions
-        cfg = [parse(class_config[name]) for name, parse in parsing_functions]
+        try:
+            cfg = [parse(class_config[name]) for name, parse in parsing_functions]
+        except KeyError as e:
+            missing = e.args[0]
+            raise KeyError(f"Missing parameter '{missing}' in section '{node_class}'") from None
+        except ValueError as e:
+            raise ValueError(f"Invalid value in section '{node_class}': {e}") from None
         # the `callable(p1, p2, *args)` idiom is equivalent to `callable(p1, p2, args[0], args[1], ...)
-        nodes.extend(Node(f"{node_class}-{i}", *cfg) for i in range(class_config.getint('number')))
+        # old
+        # nodes.extend(Node(f"{node_class}-{i}", *cfg) for i in range(class_config.getint('number')))
+        count = class_config.getint('count')
+        price_per_gb = float(class_config['price_per_gb'])
+
+        for i in range(count):
+            node = Node(f"{node_class}-{i}", *cfg)
+            block_size_gb = node.block_size / (1024 ** 3)
+            node.price_per_block = price_per_gb * block_size_gb
+            nodes.append(node)
     sim = Backup(nodes)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
