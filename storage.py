@@ -78,16 +78,13 @@ class Backup(Simulation):
             event = BlockRestoreComplete(uploader, downloader, block_id)
         else:
             # set an event to back up the block
+            # event = BlockBackupComplete(uploader, downloader, block_id)
+
+            if downloader.balance <= uploader.price_per_block:
+                self.sim.log_info(f"Transfer was skipped: {downloader} cannot afford block backup to {uploader}")
+                downloader.failed_backups_cost_reason += 1
+                return
             event = BlockBackupComplete(uploader, downloader, block_id)
-            
-            # money transfer when backing up
-            price = uploader.price_per_block
-            if downloader.balance >= price:
-                downloader.balance = downloader.balance - price
-                uploader.balance = uploader.balance + price
-            else:
-                sim.log_info(f"Transfer was skipped: {downloader} cannot afford block backup to {uploader}")
-                return # we don't want to transfer the block if the downloader cannot afford it
         # add the event to the event queue
         self.schedule(delay, event)
         # update the status of the uploader and downloader: they are busy now
@@ -233,6 +230,8 @@ class Node:
         self.total_backups_made: int = 0      # how many blocks were backed up BlockBackupComplete.update_block_state()
         self.total_restores_made: int = 0     # how many blocks were restored BlockRestoreComplete.update_block_state()
 
+        self.initial_balance = self.balance
+
     
 
     def find_block_to_back_up(self): # +TODO
@@ -288,7 +287,7 @@ class Node:
             else:
                 sim.log_info(f"{self.name} can't afford to store block {block_id} on {peer.name} (balance: {self.balance}, cost: {self.price_per_block})") # !!!111
                 self.failed_backups_cost_reason += 1
-                return
+                # return убрано
 
     def schedule_next_download(self, sim: Backup):
         """Schedule the next download, if any."""
@@ -320,7 +319,7 @@ class Node:
                     sim.schedule_transfer(peer, self, block_id, restore=False)                               # +TODO
                     return
                 else:
-                    sim.log_info(f"{peer.name} can't afford to store block {block_id} on {self.name} (balance: {peer.balance}, cost: {self.price_per_block})")
+                    sim.log_info(f"{peer.name} has no block to back up to {self.name}")
         return
 
     # Check if this node has enough balance to pay for storing one block on the peer        
@@ -464,7 +463,6 @@ class Fail(Disconnection):
         #self.node.local_blocks = [False] * self.node.n
         #self.node.total_data_loss_events += 1
         node.local_blocks = [False] * self.node.n
-        node.total_data_loss_events += 1
 
         # schedule the recovery event of this node in a random exponentioal time
         sim.schedule(recover_time, Recover(node))
@@ -492,15 +490,7 @@ class TransferComplete(Event):
 
         # economics part: only if it is a backup we send money to the peer
 
-        if isinstance(self, BlockBackupComplete):
-            cost = downloader.price_per_block
-            if uploader.balance >= cost:
-                uploader.balance = uploader.balance - cost
-                downloader.balance = downloader.balance + cost
-                print(f"[PAYMENT] {uploader} paid {cost:.2f} to {downloader} for block {self.block_id}")
-                # sim.log_info(f"{uploader} paid {cost} to {downloader} for storing block {self.block_id}")
-            else:
-                sim.log_info(f"{uploader.name} couldn't afford to pay {cost:.2f} to {downloader.name} — balance: {uploader.balance:.2f}")    
+        # было здесь if isintance...   
         # it updates the state of the uploader and downloader
         # it's implemented in the BlockBackupComplete and BlockRestoreComplete classes
         self.update_block_state()
@@ -530,8 +520,14 @@ class BlockBackupComplete(TransferComplete):
         owner.backed_up_blocks[self.block_id] = peer
         # now the peer knows that he has a block from the owner
         peer.remote_blocks_held[owner] = self.block_id
-        owner.total_backups_made += 1 # ???
+        owner.total_backups_made += 1 
 
+        price = self.uploader.price_per_block
+        if self.downloader.balance >= price:
+            self.downloader.balance -= price
+            self.uploader.balance += price
+        else:
+            logging.warning(f"{self.downloader} somehow cannot afford {price} in BlockBackupComplete")
 
 
 class BlockRestoreComplete(TransferComplete):
